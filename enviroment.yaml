@@ -10,9 +10,7 @@ dependencies:
   - torchvision=0.8.1
   - numpy=1.19.2
   - pip:
-    - opencv-python
-    - transformers==4.3.1
-    - einops==0.3.0
+    - swanlab=0.3.13
     - -e .
 
 

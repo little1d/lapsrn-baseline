@@ -1,11 +1,12 @@
 from torch.utils import data
 import torch.optim as optim
-import os
+from SRdataset import SRdataset
 from lapsrn import *
 import shutil
-from torchvision import utils as vutils
-from srdata.DF2K import DF2KTrain, DF2KValidation
-from einops import rearrange
+import os
+import torch
+import swanlab
+
 
 def save_ckp(state, is_best, checkpoint_path, best_model_path):
     """
@@ -36,42 +37,51 @@ def exp_lr_scheduler(optimizer, epoch, init_lr=0.001, lr_decay_epoch=100):
 
     return optimizer, lr
 
-def data_process(data):
-    out = []
-    for i in data:
-        if len(i.shape) == 3:
-            i = i[..., None]
-        i = rearrange(i, 'b h w c -> b c h w')
-        i = i.to(memory_format=torch.contiguous_format).float()
-        out.append(i.cuda())
-    return out
-
 # CUDA for PyTorch
+# 设置CUDA_VISIBLE_DEVICES环境变量为"1,2,3"，这样PyTorch就只能看到这三个GPU
+# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,3"
+# 检查CUDA是否可用（这将根据CUDA_VISIBLE_DEVICES的设置返回True，如果设置了至少一个可用的GPU）
 use_cuda = torch.cuda.is_available()
 device = torch.device("cuda:0" if use_cuda else "cpu")
 
-max_epochs = 1000
-
-# Generators
-training_set = DF2KTrain(size=1024)
-training_generator = data.DataLoader(training_set, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)
-
-validation_set = DF2KValidation(size=1024)
-validation_generator = data.DataLoader(validation_set, batch_size=4, shuffle=False, num_workers=1, pin_memory=True)
-
-net = LapSrnMS(5, 5, 16)
-if use_cuda:
-    net.to(device)
-    
-criterion = CharbonnierLoss()
-optimizer = optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
-logdir = 'log/training/val_%s.png'
-logdir_input = 'log/training/LR/val_%s.png'
 
 if __name__ == '__main__':
+    run = swanlab.init(
+        experiment_name="MSLapSRN-Super-Resolution",
+        description="PyTorch LapSRN implementation with weight sharing and skip connections (MSLapSRN)",
+        config={
+            "init_lr": 0.001,
+            "lr_decay_steps": 100,
+            "lr_decay_rate": 0.5,
+            "epochs": 200,
+            "batch_size": 64,
+            "patch_size": 128
+        },
+        logdir="swanlog"
+    )
+
+    max_epochs = 100
+
+    # Generators
+    training_set = SRdataset("train")
+    training_generator = data.DataLoader(training_set, batch_size=64, shuffle=True, num_workers=4, pin_memory=True)
+
+    validation_set = SRdataset("validation")
+    validation_generator = data.DataLoader(validation_set, batch_size=64, shuffle=False, num_workers=1, pin_memory=True)
+    print(training_generator, validation_generator)
+    print(len(training_generator))
+    print(len(validation_generator))
+
+    net = LapSrnMS(5, 5, 4)
+
+    if use_cuda:
+        net = torch.nn.DataParallel(net)  # 包装模型以支持多GPU
+        net.to(device)
+
+    criterion = CharbonnierLoss()
+    optimizer = optim.Adam(net.parameters(), lr=1e-3, weight_decay=1e-4)
+
     # Loop over epochs
-    os.makedirs(logdir, exist_ok=True)
-    os.makedirs(logdir_input, exist_ok=True)
     loss_min = np.inf
     running_loss_valid = 0.0
     for epoch in range(max_epochs):  # loop over the dataset multiple times
@@ -82,20 +92,19 @@ if __name__ == '__main__':
 
         for i, data in enumerate(training_generator, 0):
 
-            in_16x = data['image']
-            in_lr, in_2x, in_4x, in_8x = data['lr']
-            in_16x, in_lr, in_2x, in_4x, in_8x = data_process([in_16x, in_lr, in_2x, in_4x, in_8x])
+            # get the inputs; data is a list of [inputs, labels]
+            in_lr, in_2x, in_4x = data[0].to(device), data[1].to(device), data[2].to(device)
 
+            # in_lr.requires_grad = True
+            # zero the parameter gradients
             optimizer.zero_grad()
 
             # forward + backward + optimize
-            out_2x, out_4x, out_8x, out_16x = net(in_lr)
+            out_2x, out_4x = net(in_lr)
             loss_2x = criterion(out_2x, in_2x)
             loss_4x = criterion(out_4x, in_4x)
-            loss_8x = criterion(out_8x, in_8x)
-            loss_16x = criterion(out_16x, in_16x)
 
-            loss = (loss_2x + loss_4x + loss_8x + loss_16x) / in_lr.shape[0]
+            loss = (loss_2x + loss_4x) / in_lr.shape[0]
 
             loss.backward()
             # loss_2x.backward(retain_graph=True)
@@ -111,35 +120,27 @@ if __name__ == '__main__':
             if i % 100 == 99:  # print every 5 mini-batches
                 print('[%d, %5d] training loss: %.3f' %
                       (epoch + 1, i + 1, running_loss_train / 100))
+                swanlab.log({'training_loss': running_loss_train / 100})
                 running_loss_train = 0.0
 
         net.eval()
 
         for j, data_valid in enumerate(validation_generator, 0):
-            in_16x = data_valid['image']
-            in_lr, in_2x, in_4x, in_8x = data_valid['lr']
-            in_16x, in_lr, in_2x, in_4x, in_8x = data_process([in_16x, in_lr, in_2x, in_4x, in_8x])
+            in_lr, in_2x, in_4x = data_valid[0].to(device), data_valid[1].to(device), data_valid[2].to(device)
 
-            optimizer.zero_grad()
-
-            # forward + backward + optimize
-            out_2x, out_4x, out_8x, out_16x = net(in_lr)
+            out_2x, out_4x = net(in_lr)
             loss_2x = criterion(out_2x, in_2x)
             loss_4x = criterion(out_4x, in_4x)
-            loss_8x = criterion(out_8x, in_8x)
-            loss_16x = criterion(out_16x, in_16x)
 
-            loss = (loss_2x + loss_4x + loss_8x + loss_16x) / in_lr.shape[0]
+            loss = (loss_2x + loss_4x) / in_lr.shape[0]
 
             running_loss_valid += loss.item()
-
-        vutils.save_image(in_lr, logdir_input % str(int(epoch)), normalize=True)
-        vutils.save_image(in_16x, logdir % str(int(epoch)), normalize=True)
 
         running_loss_valid = running_loss_valid / len(validation_generator)
 
         print('[%d] validation loss: %.3f' %
               (epoch + 1, running_loss_valid))
+        swanlab.log({'validation_loss': running_loss_valid})
 
         if running_loss_valid < loss_min:
             checkpoint = {
@@ -152,5 +153,5 @@ if __name__ == '__main__':
             loss_min = running_loss_valid
 
         running_loss_valid = 0.0
-
+    
     print('Finished Training')
