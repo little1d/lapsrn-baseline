@@ -60,7 +60,7 @@ if __name__ == '__main__':
         logdir="swanlog"
     )
 
-    max_epochs = 100
+    max_epochs = 1000
 
     # Generators
     training_set = SRdataset("train")
