@@ -8,9 +8,7 @@ dependencies:
   - pytorch=2.2.1
   - torchvision=0.17.1
   - numpy=1.26.3
-  - pip:
-    - swanlab=0.3.13
-    - -e .
+
 
 
 
