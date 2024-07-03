@@ -39,18 +39,18 @@ def get_y_cb_cr(img):
 
 if __name__ == '__main__':
     run = swanlab.init()
-    checkpoint = torch.load('ckp.pt', map_location='cuda:0')
+    checkpoint = torch.load('best.pt', map_location='device')
     net = LapSrnMS(5, 5, 4)
     net = torch.nn.DataParallel(net).to(device)
     net.load_state_dict(checkpoint['state_dict'])
-    net.to('cuda')
+    net.to(device)
 
     # 分离三个通道
     y, cb, cr = get_y_cb_cr(Image.open("out_lr.png"))
 
     im = tf.to_tensor(y)
     im = im.unsqueeze(0)
-    im = im.to('cuda:0')
+    im = im.to(device)
 
     with torch.no_grad():
         out_2x, out_4x = net(im)
