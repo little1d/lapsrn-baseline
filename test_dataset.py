@@ -8,7 +8,7 @@ params = {'batch_size': 1,
           'num_workers': 4}
 
 # Generators
-training_set = SRdataset("train")
+training_set = SRdataset("train") 
 training_generator = data.DataLoader(training_set, **params)
 
 if __name__ == '__main__':
